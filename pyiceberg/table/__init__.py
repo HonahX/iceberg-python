@@ -80,8 +80,6 @@ from pyiceberg.table.metadata import (
     TableMetadataUtil,
 )
 from pyiceberg.table.refs import MAIN_BRANCH, SnapshotRef, SnapshotRefType
-from pyiceberg.table.snapshots import Snapshot, SnapshotLogEntry
-from pyiceberg.table.metadata import INITIAL_SEQUENCE_NUMBER, TableMetadata
 from pyiceberg.table.snapshots import (
     Operation,
     Snapshot,
@@ -545,7 +543,6 @@ class TableMetadataUpdateBuilder:
     @update_table_metadata.register(SetSnapshotRefUpdate)
     def _(self, update: SetSnapshotRefUpdate) -> None:
         ## TODO: may be some of the validation could be added to SnapshotRef class
-        ## TODO: may be we need to make some of the field in this update as optional or we can remove some of the checks
         if update.type is None:
             raise ValueError("Snapshot ref type must be set")
         if update.min_snapshots_to_keep is not None and update.type == SnapshotRefType.TAG:
