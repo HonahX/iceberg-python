@@ -78,7 +78,12 @@ from pyiceberg.table.metadata import (
     TableMetadata,
     TableMetadataUtil,
 )
-from pyiceberg.table.name_mapping import SCHEMA_NAME_MAPPING_DEFAULT, NameMapping, parse_mapping_from_json
+from pyiceberg.table.name_mapping import (
+    SCHEMA_NAME_MAPPING_DEFAULT,
+    NameMapping,
+    create_mapping_from_schema,
+    parse_mapping_from_json,
+)
 from pyiceberg.table.refs import MAIN_BRANCH, SnapshotRef
 from pyiceberg.table.snapshots import Snapshot, SnapshotLogEntry
 from pyiceberg.table.sorting import SortOrder

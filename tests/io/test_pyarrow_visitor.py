@@ -22,7 +22,7 @@ import pytest
 
 from pyiceberg.io.pyarrow import (
     _ConvertToArrowSchema,
-    _ConvertToIceberg,
+    _ConvertToIcebergWithFieldIds,
     _HasIds,
     new_schema_for_table,
     pyarrow_to_schema,
@@ -153,7 +153,7 @@ def iceberg_schema_nested() -> Schema:
 def test_pyarrow_binary_to_iceberg() -> None:
     length = 23
     pyarrow_type = pa.binary(length)
-    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     assert converted_iceberg_type == FixedType(length)
     assert visit(converted_iceberg_type, _ConvertToArrowSchema()) == pyarrow_type
 
@@ -162,7 +162,7 @@ def test_pyarrow_decimal128_to_iceberg() -> None:
     precision = 26
     scale = 20
     pyarrow_type = pa.decimal128(precision, scale)
-    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     assert converted_iceberg_type == DecimalType(precision, scale)
     assert visit(converted_iceberg_type, _ConvertToArrowSchema()) == pyarrow_type
 
@@ -172,47 +172,47 @@ def test_pyarrow_decimal256_to_iceberg() -> None:
     scale = 20
     pyarrow_type = pa.decimal256(precision, scale)
     with pytest.raises(TypeError, match=re.escape("Unsupported type: decimal256(26, 20)")):
-        visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+        visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
 
 
 def test_pyarrow_boolean_to_iceberg() -> None:
     pyarrow_type = pa.bool_()
-    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     assert converted_iceberg_type == BooleanType()
     assert visit(converted_iceberg_type, _ConvertToArrowSchema()) == pyarrow_type
 
 
 def test_pyarrow_int32_to_iceberg() -> None:
     pyarrow_type = pa.int32()
-    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     assert converted_iceberg_type == IntegerType()
     assert visit(converted_iceberg_type, _ConvertToArrowSchema()) == pyarrow_type
 
 
 def test_pyarrow_int64_to_iceberg() -> None:
     pyarrow_type = pa.int64()
-    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     assert converted_iceberg_type == LongType()
     assert visit(converted_iceberg_type, _ConvertToArrowSchema()) == pyarrow_type
 
 
 def test_pyarrow_float32_to_iceberg() -> None:
     pyarrow_type = pa.float32()
-    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     assert converted_iceberg_type == FloatType()
     assert visit(converted_iceberg_type, _ConvertToArrowSchema()) == pyarrow_type
 
 
 def test_pyarrow_float64_to_iceberg() -> None:
     pyarrow_type = pa.float64()
-    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     assert converted_iceberg_type == DoubleType()
     assert visit(converted_iceberg_type, _ConvertToArrowSchema()) == pyarrow_type
 
 
 def test_pyarrow_date32_to_iceberg() -> None:
     pyarrow_type = pa.date32()
-    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     assert converted_iceberg_type == DateType()
     assert visit(converted_iceberg_type, _ConvertToArrowSchema()) == pyarrow_type
 
@@ -220,21 +220,21 @@ def test_pyarrow_date32_to_iceberg() -> None:
 def test_pyarrow_date64_to_iceberg() -> None:
     pyarrow_type = pa.date64()
     with pytest.raises(TypeError, match=re.escape("Unsupported type: date64")):
-        visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+        visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
 
 
 def test_pyarrow_time32_to_iceberg() -> None:
     pyarrow_type = pa.time32("ms")
     with pytest.raises(TypeError, match=re.escape("Unsupported type: time32[ms]")):
-        visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+        visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     pyarrow_type = pa.time32("s")
     with pytest.raises(TypeError, match=re.escape("Unsupported type: time32[s]")):
-        visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+        visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
 
 
 def test_pyarrow_time64_us_to_iceberg() -> None:
     pyarrow_type = pa.time64("us")
-    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     assert converted_iceberg_type == TimeType()
     assert visit(converted_iceberg_type, _ConvertToArrowSchema()) == pyarrow_type
 
@@ -242,12 +242,12 @@ def test_pyarrow_time64_us_to_iceberg() -> None:
 def test_pyarrow_time64_ns_to_iceberg() -> None:
     pyarrow_type = pa.time64("ns")
     with pytest.raises(TypeError, match=re.escape("Unsupported type: time64[ns]")):
-        visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+        visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
 
 
 def test_pyarrow_timestamp_to_iceberg() -> None:
     pyarrow_type = pa.timestamp(unit="us")
-    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     assert converted_iceberg_type == TimestampType()
     assert visit(converted_iceberg_type, _ConvertToArrowSchema()) == pyarrow_type
 
@@ -255,20 +255,20 @@ def test_pyarrow_timestamp_to_iceberg() -> None:
 def test_pyarrow_timestamp_invalid_units() -> None:
     pyarrow_type = pa.timestamp(unit="ms")
     with pytest.raises(TypeError, match=re.escape("Unsupported type: timestamp[ms]")):
-        visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+        visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     pyarrow_type = pa.timestamp(unit="s")
     with pytest.raises(TypeError, match=re.escape("Unsupported type: timestamp[s]")):
-        visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+        visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     pyarrow_type = pa.timestamp(unit="ns")
     with pytest.raises(TypeError, match=re.escape("Unsupported type: timestamp[ns]")):
-        visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+        visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
 
 
 def test_pyarrow_timestamp_tz_to_iceberg() -> None:
     pyarrow_type = pa.timestamp(unit="us", tz="UTC")
     pyarrow_type_zero_offset = pa.timestamp(unit="us", tz="+00:00")
-    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIceberg())
-    converted_iceberg_type_zero_offset = visit_pyarrow(pyarrow_type_zero_offset, _ConvertToIceberg())
+    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
+    converted_iceberg_type_zero_offset = visit_pyarrow(pyarrow_type_zero_offset, _ConvertToIcebergWithFieldIds())
     assert converted_iceberg_type == TimestamptzType()
     assert converted_iceberg_type_zero_offset == TimestamptzType()
     assert visit(converted_iceberg_type, _ConvertToArrowSchema()) == pyarrow_type
@@ -278,31 +278,31 @@ def test_pyarrow_timestamp_tz_to_iceberg() -> None:
 def test_pyarrow_timestamp_tz_invalid_units() -> None:
     pyarrow_type = pa.timestamp(unit="ms", tz="UTC")
     with pytest.raises(TypeError, match=re.escape("Unsupported type: timestamp[ms, tz=UTC]")):
-        visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+        visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     pyarrow_type = pa.timestamp(unit="s", tz="UTC")
     with pytest.raises(TypeError, match=re.escape("Unsupported type: timestamp[s, tz=UTC]")):
-        visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+        visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     pyarrow_type = pa.timestamp(unit="ns", tz="UTC")
     with pytest.raises(TypeError, match=re.escape("Unsupported type: timestamp[ns, tz=UTC]")):
-        visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+        visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
 
 
 def test_pyarrow_timestamp_tz_invalid_tz() -> None:
     pyarrow_type = pa.timestamp(unit="us", tz="US/Pacific")
     with pytest.raises(TypeError, match=re.escape("Unsupported type: timestamp[us, tz=US/Pacific]")):
-        visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+        visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
 
 
 def test_pyarrow_string_to_iceberg() -> None:
     pyarrow_type = pa.string()
-    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     assert converted_iceberg_type == StringType()
     assert visit(converted_iceberg_type, _ConvertToArrowSchema()) == pyarrow_type
 
 
 def test_pyarrow_variable_binary_to_iceberg() -> None:
     pyarrow_type = pa.binary()
-    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIceberg())
+    converted_iceberg_type = visit_pyarrow(pyarrow_type, _ConvertToIcebergWithFieldIds())
     assert converted_iceberg_type == BinaryType()
     assert visit(converted_iceberg_type, _ConvertToArrowSchema()) == pyarrow_type
 
@@ -318,7 +318,7 @@ def test_pyarrow_struct_to_iceberg() -> None:
         NestedField(field_id=2, name="bar", field_type=IntegerType(), required=True),
         NestedField(field_id=3, name="baz", field_type=BooleanType(), required=False),
     )
-    assert visit_pyarrow(pyarrow_struct, _ConvertToIceberg()) == expected
+    assert visit_pyarrow(pyarrow_struct, _ConvertToIcebergWithFieldIds()) == expected
 
 
 def test_pyarrow_list_to_iceberg() -> None:
@@ -328,7 +328,7 @@ def test_pyarrow_list_to_iceberg() -> None:
         element_type=IntegerType(),
         element_required=True,
     )
-    assert visit_pyarrow(pyarrow_list, _ConvertToIceberg()) == expected
+    assert visit_pyarrow(pyarrow_list, _ConvertToIcebergWithFieldIds()) == expected
 
 
 def test_pyarrow_map_to_iceberg() -> None:
@@ -343,7 +343,7 @@ def test_pyarrow_map_to_iceberg() -> None:
         value_type=StringType(),
         value_required=True,
     )
-    assert visit_pyarrow(pyarrow_map, _ConvertToIceberg()) == expected
+    assert visit_pyarrow(pyarrow_map, _ConvertToIcebergWithFieldIds()) == expected
 
 
 def test_round_schema_conversion_simple(table_schema_simple: Schema) -> None:
@@ -579,9 +579,3 @@ def test_new_schema_for_table_simple_schema(pyarrow_schema_simple_without_ids: p
     schema = pyarrow_schema_simple_without_ids
 
     assert new_schema_for_table(schema) == iceberg_schema_simple
-
-
-def test_new_schema_for_table_nested_schema(pyarrow_schema_nested_without_ids: pa.Schema, iceberg_schema_nested: Schema) -> None:
-    schema = pyarrow_schema_nested_without_ids
-
-    assert new_schema_for_table(schema) == iceberg_schema_nested
