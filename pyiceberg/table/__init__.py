@@ -949,7 +949,8 @@ class Table:
         if len(self.spec().fields) > 0:
             raise ValueError("Cannot write to partitioned tables")
 
-        merge = _MergingSnapshotProducer(operation=Operation.APPEND, table=self)
+        # TODO: need to consider how to support both _MergeAppend and _FastAppend
+        merge = _MergeAppend(operation=Operation.APPEND, table=self)
 
         # skip writing data files if the dataframe is empty
         if df.shape[0] > 0:
@@ -982,7 +983,7 @@ class Table:
         if len(self.spec().fields) > 0:
             raise ValueError("Cannot write to partitioned tables")
 
-        merge = _MergingSnapshotProducer(
+        merge = _MergeAppend(
             operation=Operation.OVERWRITE if self.current_snapshot() is not None else Operation.APPEND,
             table=self,
         )
@@ -2302,7 +2303,7 @@ def _dataframe_to_data_files(table: Table, df: pa.Table) -> Iterable[DataFile]:
     yield from write_file(table, iter([WriteTask(write_uuid, next(counter), df)]))
 
 
-class _MergingSnapshotProducer:
+class _SnapshotProducer(ABC):
     _operation: Operation
     _table: Table
     _snapshot_id: int
@@ -2310,9 +2311,6 @@ class _MergingSnapshotProducer:
     _added_data_files: List[DataFile]
     _commit_uuid: uuid.UUID
     _manifest_num_counter: itertools.count[int]
-    _target_size_bytes: int
-    _min_count_to_merge: int
-    _merge_enabled: bool
 
     def __init__(self, operation: Operation, table: Table) -> None:
         self._operation = operation
@@ -2324,12 +2322,7 @@ class _MergingSnapshotProducer:
         self._commit_uuid = uuid.uuid4()
         self._manifest_num_counter = itertools.count(0)
 
-        # TODO: consider if we can add a TableProperties class to handle these like Java
-        self._target_size_bytes = int(self._table.properties.get("commit.manifest.target-size-bytes", str(8 * 1024 * 1024)))
-        self._min_count_to_merge = int(self._table.properties.get("commit.manifest.min-count-to-merge", "100"))
-        self._merge_enabled = self._table.properties.get("commit.manifest-merge.enabled", "true").lower() == "true"
-
-    def append_data_file(self, data_file: DataFile) -> _MergingSnapshotProducer:
+    def append_data_file(self, data_file: DataFile) -> _SnapshotProducer:
         self._added_data_files.append(data_file)
         return self
 
@@ -2444,22 +2437,12 @@ class _MergingSnapshotProducer:
         added_manifests = added_manifests_future.result()
         delete_manifests = delete_manifests_future.result()
         existing_manifests = existing_manifests_future.result()
-        unmerged_data_manifests = (
-            added_manifests
-            + delete_manifests
-            + [manifest for manifest in existing_manifests if manifest.content == ManifestContent.DATA]
-        )
-        # TODO: need to re-consider the name here: manifest containing positional deletes and manifest containing deleted entries
-        unmerged_deletes_manifests = [manifest for manifest in existing_manifests if manifest.content == ManifestContent.DELETES]
+        return self._combine_manifests(added_manifests, delete_manifests, existing_manifests)
 
-        data_manifest_merge_manager = ManifestMergeManager(
-            target_size_bytes=self._target_size_bytes,
-            min_count_to_merge=self._min_count_to_merge,
-            merge_enabled=self._merge_enabled,
-            snapshot_producer=self,
-        )
-
-        return data_manifest_merge_manager.merge_manifests(unmerged_data_manifests) + unmerged_deletes_manifests
+    @abstractmethod
+    def _combine_manifests(
+        self, added_manifests: List[ManifestFile], delete_manifests: List[ManifestFile], existing_manifests: List[ManifestFile]
+    ) -> List[ManifestFile]: ...
 
     def _summary(self) -> Summary:
         ssc = SnapshotSummaryCollector()
@@ -2537,14 +2520,54 @@ class _MergingSnapshotProducer:
         return manifest.fetch_manifest_entry(io=self._table.io, discard_deleted=discard_deleted)
 
 
-class ManifestMergeManager:
+class _MergeAppend(_SnapshotProducer):
     _target_size_bytes: int
     _min_count_to_merge: int
     _merge_enabled: bool
-    _snapshot_producer: _MergingSnapshotProducer
+
+    def __init__(self, operation: Operation, table: Table) -> None:
+        super().__init__(operation, table)
+        # TODO: consider if we can add a TableProperties class to handle these like Java
+        self._target_size_bytes = int(self._table.properties.get("commit.manifest.target-size-bytes", str(8 * 1024 * 1024)))
+        self._min_count_to_merge = int(self._table.properties.get("commit.manifest.min-count-to-merge", "100"))
+        self._merge_enabled = self._table.properties.get("commit.manifest-merge.enabled", "true").lower() == "true"
+
+    def _combine_manifests(
+        self, added_manifests: List[ManifestFile], delete_manifests: List[ManifestFile], existing_manifests: List[ManifestFile]
+    ) -> List[ManifestFile]:
+        unmerged_data_manifests = (
+            added_manifests
+            + delete_manifests
+            + [manifest for manifest in existing_manifests if manifest.content == ManifestContent.DATA]
+        )
+        # TODO: need to re-consider the name here: manifest containing positional deletes and manifest containing deleted entries
+        unmerged_deletes_manifests = [manifest for manifest in existing_manifests if manifest.content == ManifestContent.DELETES]
+
+        data_manifest_merge_manager = _ManifestMergeManager(
+            target_size_bytes=self._target_size_bytes,
+            min_count_to_merge=self._min_count_to_merge,
+            merge_enabled=self._merge_enabled,
+            snapshot_producer=self,
+        )
+
+        return data_manifest_merge_manager.merge_manifests(unmerged_data_manifests) + unmerged_deletes_manifests
+
+
+class _FastAppend(_SnapshotProducer):
+    def _combine_manifests(
+        self, added_manifests: List[ManifestFile], delete_manifests: List[ManifestFile], existing_manifests: List[ManifestFile]
+    ) -> List[ManifestFile]:
+        return added_manifests + delete_manifests + existing_manifests
+
+
+class _ManifestMergeManager:
+    _target_size_bytes: int
+    _min_count_to_merge: int
+    _merge_enabled: bool
+    _snapshot_producer: _SnapshotProducer
 
     def __init__(
-        self, target_size_bytes: int, min_count_to_merge: int, merge_enabled: bool, snapshot_producer: _MergingSnapshotProducer
+        self, target_size_bytes: int, min_count_to_merge: int, merge_enabled: bool, snapshot_producer: _SnapshotProducer
     ) -> None:
         self._target_size_bytes = target_size_bytes
         self._min_count_to_merge = min_count_to_merge
@@ -2587,7 +2610,7 @@ class ManifestMergeManager:
                             )
                         )
 
-            return writer.to_manifest_file()
+        return writer.to_manifest_file()
 
     def _merge_group(self, first_manifest: ManifestFile, spec_id: int, manifests: List[ManifestFile]) -> List[ManifestFile]:
         packer: ListPacker[ManifestFile] = ListPacker(target_weight=self._target_size_bytes, lookback=1, largest_bin_first=False)
