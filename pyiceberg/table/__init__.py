@@ -174,6 +174,15 @@ class TableProperties:
     FORMAT_VERSION = "format-version"
     DEFAULT_FORMAT_VERSION = 2
 
+    MANIFEST_TARGET_SIZE_BYTES = "commit.manifest.target-size-bytes"
+    MANIFEST_TARGET_SIZE_BYTES_DEFAULT = 8 * 1024 * 1024  # 8 MB
+
+    MANIFEST_MIN_MERGE_COUNT = "commit.manifest.min-count-to-merge"
+    MANIFEST_MIN_MERGE_COUNT_DEFAULT = 100
+
+    MANIFEST_MERGE_ENABLED = "commit.manifest-merge.enabled"
+    MANIFEST_MERGE_ENABLED_DEFAULT = True
+
 
 class PropertyUtil:
     @staticmethod
@@ -185,6 +194,12 @@ class PropertyUtil:
                 raise ValueError(f"Could not parse table property {property_name} to an integer: {value}") from e
         else:
             return default
+
+    @staticmethod
+    def property_as_bool(properties: Dict[str, str], property_name: str, default: bool) -> bool:
+        if value := properties.get(property_name):
+            return value.lower() == "true"
+        return default
 
 
 class Transaction:
@@ -2575,10 +2590,15 @@ class _MergeAppend(_SnapshotProducer):
 
     def __init__(self, operation: Operation, table: Table) -> None:
         super().__init__(operation, table)
-        # TODO: consider if we can add a TableProperties class to handle these like Java
-        self._target_size_bytes = int(self._table.properties.get("commit.manifest.target-size-bytes", str(8 * 1024 * 1024)))
-        self._min_count_to_merge = int(self._table.properties.get("commit.manifest.min-count-to-merge", "100"))
-        self._merge_enabled = self._table.properties.get("commit.manifest-merge.enabled", "true").lower() == "true"
+        self._target_size_bytes = PropertyUtil.property_as_int(
+            self._table.properties, TableProperties.MANIFEST_TARGET_SIZE_BYTES, TableProperties.MANIFEST_TARGET_SIZE_BYTES_DEFAULT
+        )  # type: ignore
+        self._min_count_to_merge = PropertyUtil.property_as_int(
+            self._table.properties, TableProperties.MANIFEST_MIN_MERGE_COUNT, TableProperties.MANIFEST_MIN_MERGE_COUNT_DEFAULT
+        )  # type: ignore
+        self._merge_enabled = PropertyUtil.property_as_bool(
+            self._table.properties, TableProperties.MANIFEST_MERGE_ENABLED, TableProperties.MANIFEST_MERGE_ENABLED_DEFAULT
+        )
 
     def _combine_manifests(
         self, added_manifests: List[ManifestFile], delete_manifests: List[ManifestFile], existing_manifests: List[ManifestFile]
