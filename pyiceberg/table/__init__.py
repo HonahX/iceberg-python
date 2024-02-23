@@ -16,11 +16,14 @@
 # under the License.
 from __future__ import annotations
 
+import concurrent
 import datetime
 import itertools
 import uuid
 import warnings
 from abc import ABC, abstractmethod
+from collections import defaultdict
+from concurrent.futures import Future
 from copy import copy
 from dataclasses import dataclass
 from enum import Enum
@@ -55,7 +58,7 @@ from pyiceberg.expressions import (
     visitors,
 )
 from pyiceberg.expressions.visitors import _InclusiveMetricsEvaluator, inclusive_projection
-from pyiceberg.io import FileIO, load_file_io
+from pyiceberg.io import FileIO, OutputFile, load_file_io
 from pyiceberg.manifest import (
     POSITIONAL_DELETE_SCHEMA,
     DataFile,
@@ -64,6 +67,7 @@ from pyiceberg.manifest import (
     ManifestEntry,
     ManifestEntryStatus,
     ManifestFile,
+    ManifestWriter,
     write_manifest,
     write_manifest_list,
 )
@@ -111,6 +115,7 @@ from pyiceberg.types import (
     PrimitiveType,
     StructType,
 )
+from pyiceberg.utils.bin_packing import ListPacker
 from pyiceberg.utils.concurrent import ExecutorFactory
 from pyiceberg.utils.datetime import datetime_to_millis
 
@@ -165,6 +170,15 @@ class TableProperties:
     FORMAT_VERSION = "format-version"
     DEFAULT_FORMAT_VERSION = 2
 
+    MANIFEST_TARGET_SIZE_BYTES = "commit.manifest.target-size-bytes"
+    MANIFEST_TARGET_SIZE_BYTES_DEFAULT = 8 * 1024 * 1024  # 8 MB
+
+    MANIFEST_MIN_MERGE_COUNT = "commit.manifest.min-count-to-merge"
+    MANIFEST_MIN_MERGE_COUNT_DEFAULT = 100
+
+    MANIFEST_MERGE_ENABLED = "commit.manifest-merge.enabled"
+    MANIFEST_MERGE_ENABLED_DEFAULT = True
+
 
 class PropertyUtil:
     @staticmethod
@@ -176,6 +190,12 @@ class PropertyUtil:
                 raise ValueError(f"Could not parse table property {property_name} to an integer: {value}") from e
         else:
             return default
+
+    @staticmethod
+    def property_as_bool(properties: Dict[str, str], property_name: str, default: bool) -> bool:
+        if value := properties.get(property_name):
+            return value.lower() == "true"
+        return default
 
 
 class Transaction:
@@ -1015,7 +1035,7 @@ class Table:
         if len(self.spec().fields) > 0:
             raise ValueError("Cannot write to partitioned tables")
 
-        with self.update_snapshot().fast_append() as update_snapshot:
+        with self.update_snapshot().merge_append() as update_snapshot:
             # skip writing data files if the dataframe is empty
             if df.shape[0] > 0:
                 data_files = _dataframe_to_data_files(self, write_uuid=update_snapshot.commit_uuid, df=df)
@@ -2372,7 +2392,7 @@ def _dataframe_to_data_files(
     yield from write_file(table, iter([WriteTask(write_uuid, next(counter), df)]), file_schema=file_schema)
 
 
-class _MergingSnapshotProducer:
+class _SnapshotProducer:
     commit_uuid: uuid.UUID
     _operation: Operation
     _table: Table
@@ -2380,6 +2400,7 @@ class _MergingSnapshotProducer:
     _parent_snapshot_id: Optional[int]
     _added_data_files: List[DataFile]
     _transaction: Optional[Transaction]
+    _manifest_num_counter: itertools.count[int]
 
     def __init__(
         self,
@@ -2396,8 +2417,9 @@ class _MergingSnapshotProducer:
         self._parent_snapshot_id = snapshot.snapshot_id if (snapshot := self._table.current_snapshot()) else None
         self._added_data_files = []
         self._transaction = transaction
+        self._manifest_num_counter = itertools.count(0)
 
-    def __enter__(self) -> _MergingSnapshotProducer:
+    def __enter__(self) -> _SnapshotProducer:
         """Start a transaction to update the table."""
         return self
 
@@ -2405,7 +2427,7 @@ class _MergingSnapshotProducer:
         """Close and commit the transaction."""
         self.commit()
 
-    def append_data_file(self, data_file: DataFile) -> _MergingSnapshotProducer:
+    def append_data_file(self, data_file: DataFile) -> _SnapshotProducer:
         self._added_data_files.append(data_file)
         return self
 
@@ -2414,6 +2436,11 @@ class _MergingSnapshotProducer:
 
     @abstractmethod
     def _existing_manifests(self) -> List[ManifestFile]: ...
+
+    def _combine_manifests(
+        self, added_manifests: List[ManifestFile], delete_manifests: List[ManifestFile], existing_manifests: List[ManifestFile]
+    ) -> List[ManifestFile]:
+        return added_manifests + delete_manifests + existing_manifests
 
     def _manifests(self) -> List[ManifestFile]:
         def _write_added_manifest() -> List[ManifestFile]:
@@ -2465,7 +2492,7 @@ class _MergingSnapshotProducer:
         delete_manifests = executor.submit(_write_delete_manifest)
         existing_manifests = executor.submit(self._existing_manifests)
 
-        return added_manifests.result() + delete_manifests.result() + existing_manifests.result()
+        return self._combine_manifests(added_manifests.result(), delete_manifests.result(), existing_manifests.result())
 
     def _summary(self) -> Summary:
         ssc = SnapshotSummaryCollector()
@@ -2522,8 +2549,101 @@ class _MergingSnapshotProducer:
 
         return snapshot
 
+    @property
+    def snapshot_id(self) -> int:
+        return self._snapshot_id
 
-class FastAppendFiles(_MergingSnapshotProducer):
+    def spec(self, spec_id: int) -> PartitionSpec:
+        return self._table.specs()[spec_id]
+
+    def new_manifest_writer(self, spec: PartitionSpec) -> ManifestWriter:
+        return write_manifest(
+            format_version=self._table.format_version,
+            spec=spec,
+            schema=self._table.schema(),
+            output_file=self.new_manifest_output(),
+            snapshot_id=self._snapshot_id,
+        )
+
+    def new_manifest_output(self) -> OutputFile:
+        return self._table.io.new_output(
+            _new_manifest_path(
+                location=self._table.location(), num=next(self._manifest_num_counter), commit_uuid=self.commit_uuid
+            )
+        )
+
+    def fetch_manifest_entry(self, manifest: ManifestFile, discard_deleted: bool = True) -> List[ManifestEntry]:
+        return manifest.fetch_manifest_entry(io=self._table.io, discard_deleted=discard_deleted)
+
+
+class MergeAppendFiles(_SnapshotProducer):
+    _target_size_bytes: int
+    _min_count_to_merge: int
+    _merge_enabled: bool
+
+    def __init__(
+        self,
+        operation: Operation,
+        table: Table,
+        commit_uuid: Optional[uuid.UUID] = None,
+        transaction: Optional[Transaction] = None,
+    ) -> None:
+        super().__init__(operation, table, commit_uuid, transaction)
+        self._target_size_bytes = PropertyUtil.property_as_int(
+            self._table.properties, TableProperties.MANIFEST_TARGET_SIZE_BYTES, TableProperties.MANIFEST_TARGET_SIZE_BYTES_DEFAULT
+        )  # type: ignore
+        self._min_count_to_merge = PropertyUtil.property_as_int(
+            self._table.properties, TableProperties.MANIFEST_MIN_MERGE_COUNT, TableProperties.MANIFEST_MIN_MERGE_COUNT_DEFAULT
+        )  # type: ignore
+        self._merge_enabled = PropertyUtil.property_as_bool(
+            self._table.properties, TableProperties.MANIFEST_MERGE_ENABLED, TableProperties.MANIFEST_MERGE_ENABLED_DEFAULT
+        )
+
+    def _existing_manifests(self) -> List[ManifestFile]:
+        """To determine if there are any existing manifest files."""
+        existing_manifests = []
+
+        if self._parent_snapshot_id is not None:
+            previous_snapshot = self._table.snapshot_by_id(self._parent_snapshot_id)
+
+            if previous_snapshot is None:
+                raise ValueError(f"Snapshot could not be found: {self._parent_snapshot_id}")
+
+            for manifest in previous_snapshot.manifests(io=self._table.io):
+                if manifest.has_added_files() or manifest.has_existing_files() or manifest.added_snapshot_id == self._snapshot_id:
+                    existing_manifests.append(manifest)
+
+        return existing_manifests
+
+    def _deleted_entries(self) -> List[ManifestEntry]:
+        """To determine if we need to record any deleted manifest entries.
+
+        In case of an append, nothing is deleted.
+        """
+        return []
+
+    def _combine_manifests(
+        self, added_manifests: List[ManifestFile], delete_manifests: List[ManifestFile], existing_manifests: List[ManifestFile]
+    ) -> List[ManifestFile]:
+        unmerged_data_manifests = (
+            added_manifests
+            + delete_manifests
+            + [manifest for manifest in existing_manifests if manifest.content == ManifestContent.DATA]
+        )
+        # TODO: need to re-consider the name here: manifest containing positional deletes and manifest containing deleted entries
+        unmerged_deletes_manifests = [manifest for manifest in existing_manifests if manifest.content == ManifestContent.DELETES]
+
+        data_manifest_merge_manager = _ManifestMergeManager(
+            target_size_bytes=self._target_size_bytes,
+            min_count_to_merge=self._min_count_to_merge,
+            merge_enabled=self._merge_enabled,
+            snapshot_producer=self,
+        )
+
+        return data_manifest_merge_manager.merge_manifests(unmerged_data_manifests) + unmerged_deletes_manifests
+
+
+class FastAppendFiles(_SnapshotProducer):
     def _existing_manifests(self) -> List[ManifestFile]:
         """To determine if there are any existing manifest files.
 
@@ -2552,7 +2672,7 @@ class FastAppendFiles(_MergingSnapshotProducer):
         return []
 
 
-class OverwriteFiles(_MergingSnapshotProducer):
+class OverwriteFiles(_SnapshotProducer):
     def _existing_manifests(self) -> List[ManifestFile]:
         """To determine if there are any existing manifest files.
 
@@ -2606,9 +2726,112 @@ class UpdateSnapshot:
     def fast_append(self) -> FastAppendFiles:
         return FastAppendFiles(table=self._table, operation=Operation.APPEND, transaction=self._transaction)
 
+    def merge_append(self) -> MergeAppendFiles:
+        return MergeAppendFiles(table=self._table, operation=Operation.APPEND, transaction=self._transaction)
+
     def overwrite(self) -> OverwriteFiles:
         return OverwriteFiles(
             table=self._table,
             operation=Operation.OVERWRITE if self._table.current_snapshot() is not None else Operation.APPEND,
             transaction=self._transaction,
         )
+
+
+class _ManifestMergeManager:
+    _target_size_bytes: int
+    _min_count_to_merge: int
+    _merge_enabled: bool
+    _snapshot_producer: _SnapshotProducer
+
+    def __init__(
+        self, target_size_bytes: int, min_count_to_merge: int, merge_enabled: bool, snapshot_producer: _SnapshotProducer
+    ) -> None:
+        self._target_size_bytes = target_size_bytes
+        self._min_count_to_merge = min_count_to_merge
+        self._merge_enabled = merge_enabled
+        self._snapshot_producer = snapshot_producer
+
+    def _group_by_spec(
+        self, first_manifest: ManifestFile, remaining_manifests: List[ManifestFile]
+    ) -> Dict[int, List[ManifestFile]]:
+        groups = defaultdict(list)
+        groups[first_manifest.partition_spec_id].append(first_manifest)
+        for manifest in remaining_manifests:
+            groups[manifest.partition_spec_id].append(manifest)
+        return groups
+
+    def _create_manifest(self, spec_id: int, manifest_bin: List[ManifestFile]) -> ManifestFile:
+        # TODO: later check if we need to implement cache:
+        #  https://github.com/apache/iceberg/blob/main/core/src/main/java/org/apache/iceberg/ManifestMergeManager.java#L165
+
+        with self._snapshot_producer.new_manifest_writer(spec=self._snapshot_producer.spec(spec_id)) as writer:
+            for manifest in manifest_bin:
+                for entry in self._snapshot_producer.fetch_manifest_entry(manifest):
+                    if entry.status == ManifestEntryStatus.DELETED:
+                        #  suppress deletes from previous snapshots. only files deleted by this snapshot
+                        #                should be added to the new manifest
+                        if entry.snapshot_id == self._snapshot_producer.snapshot_id:
+                            writer.add_entry(entry)
+                    elif entry.status == ManifestEntryStatus.ADDED and entry.snapshot_id == self._snapshot_producer.snapshot_id:
+                        # adds from this snapshot are still adds, otherwise they should be existing
+                        writer.add_entry(entry)
+                    else:
+                        # add all files from the old manifest as existing files
+                        writer.add_entry(
+                            ManifestEntry(
+                                status=ManifestEntryStatus.EXISTING,
+                                snapshot_id=entry.snapshot_id,
+                                data_sequence_number=entry.data_sequence_number,
+                                file_sequence_number=entry.file_sequence_number,
+                                data_file=entry.data_file,
+                            )
+                        )
+
+        return writer.to_manifest_file()
+
+    def _merge_group(self, first_manifest: ManifestFile, spec_id: int, manifests: List[ManifestFile]) -> List[ManifestFile]:
+        packer: ListPacker[ManifestFile] = ListPacker(target_weight=self._target_size_bytes, lookback=1, largest_bin_first=False)
+        bins: List[List[ManifestFile]] = packer.pack_end(manifests, lambda m: m.manifest_length)
+
+        def merge_bin(manifest_bin: List[ManifestFile]) -> List[ManifestFile]:
+            output_manifests = []
+            if len(manifest_bin) == 1:
+                output_manifests.append(manifest_bin[0])
+            elif first_manifest in manifest_bin and len(manifest_bin) < self._min_count_to_merge:
+                #  if the bin has the first manifest (the new data files or an appended manifest file)
+                #  then only merge it
+                #  if the number of manifests is above the minimum count. this is applied only to bins
+                #  with an in-memory
+                #  manifest so that large manifests don't prevent merging older groups.
+                output_manifests.extend(manifest_bin)
+            else:
+                output_manifests.append(self._create_manifest(spec_id, manifest_bin))
+
+            return output_manifests
+
+        executor = ExecutorFactory.get_or_create()
+        futures = [executor.submit(merge_bin, b) for b in bins]
+
+        # for consistent ordering, we need to maintain future order
+        futures_index = {f: i for i, f in enumerate(futures)}
+        completed_futures: SortedList[Future[List[ManifestFile]]] = SortedList(iterable=[], key=lambda f: futures_index[f])
+        for future in concurrent.futures.as_completed(futures):
+            completed_futures.add(future)
+
+        bin_results: List[List[ManifestFile]] = [f.result() for f in completed_futures if f.result()]
+
+        return [manifest for bin_result in bin_results for manifest in bin_result]
+
+    def merge_manifests(self, manifests: List[ManifestFile]) -> List[ManifestFile]:
+        if not self._merge_enabled or len(manifests) == 0:
+            return manifests
+
+        first_manifest = manifests[0]
+        remaining_manifests = manifests[1:]
+        groups = self._group_by_spec(first_manifest, remaining_manifests)
+
+        merged_manifests = []
+        for spec_id in reversed(groups.keys()):
+            merged_manifests.extend(self._merge_group(first_manifest, spec_id, groups[spec_id]))
+
+        return merged_manifests
