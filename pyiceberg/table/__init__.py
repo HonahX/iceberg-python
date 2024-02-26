@@ -2435,7 +2435,7 @@ def _dataframe_to_data_files(
     yield from write_file(table, iter([WriteTask(write_uuid, next(counter), df)]), file_schema=file_schema)
 
 
-class _SnapshotProducer:
+class _SnapshotProducer(ABC):
     commit_uuid: uuid.UUID
     _operation: Operation
     _table: Table
@@ -2480,10 +2480,9 @@ class _SnapshotProducer:
     @abstractmethod
     def _existing_manifests(self) -> List[ManifestFile]: ...
 
-    def _combine_manifests(
-        self, added_manifests: List[ManifestFile], delete_manifests: List[ManifestFile], existing_manifests: List[ManifestFile]
-    ) -> List[ManifestFile]:
-        return added_manifests + delete_manifests + existing_manifests
+    def _process_manifests(self, manifests: List[ManifestFile]) -> List[ManifestFile]:
+        """To perform any post-processing on the manifests before writing them to the new snapshot."""
+        return manifests
 
     def _manifests(self) -> List[ManifestFile]:
         def _write_added_manifest() -> List[ManifestFile]:
@@ -2535,7 +2534,7 @@ class _SnapshotProducer:
         delete_manifests = executor.submit(_write_delete_manifest)
         existing_manifests = executor.submit(self._existing_manifests)
 
-        return self._combine_manifests(added_manifests.result(), delete_manifests.result(), existing_manifests.result())
+        return self._process_manifests(added_manifests.result() + delete_manifests.result() + existing_manifests.result())
 
     def _summary(self) -> Summary:
         ssc = SnapshotSummaryCollector()
@@ -2619,7 +2618,30 @@ class _SnapshotProducer:
         return manifest.fetch_manifest_entry(io=self._table.io, discard_deleted=discard_deleted)
 
 
-class MergeAppendFiles(_SnapshotProducer):
+class AppendFiles(_SnapshotProducer, ABC):
+    def _existing_manifests(self) -> List[ManifestFile]:
+        """To determine if there are any existing manifest files.
+
+        All the existing manifest files are considered existing.
+        A fast append will add another ManifestFile to the ManifestList.
+        A merge append will merge ManifestFiles if needed later.
+        """
+        existing_manifests = []
+
+        if self._parent_snapshot_id is not None:
+            previous_snapshot = self._table.snapshot_by_id(self._parent_snapshot_id)
+
+            if previous_snapshot is None:
+                raise ValueError(f"Snapshot could not be found: {self._parent_snapshot_id}")
+
+            for manifest in previous_snapshot.manifests(io=self._table.io):
+                if manifest.has_added_files() or manifest.has_existing_files() or manifest.added_snapshot_id == self._snapshot_id:
+                    existing_manifests.append(manifest)
+
+        return existing_manifests
+
+
+class MergeAppendFiles(AppendFiles):
     _target_size_bytes: int
     _min_count_to_merge: int
     _merge_enabled: bool
@@ -2642,22 +2664,6 @@ class MergeAppendFiles(_SnapshotProducer):
             self._table.properties, TableProperties.MANIFEST_MERGE_ENABLED, TableProperties.MANIFEST_MERGE_ENABLED_DEFAULT
         )
 
-    def _existing_manifests(self) -> List[ManifestFile]:
-        """To determine if there are any existing manifest files."""
-        existing_manifests = []
-
-        if self._parent_snapshot_id is not None:
-            previous_snapshot = self._table.snapshot_by_id(self._parent_snapshot_id)
-
-            if previous_snapshot is None:
-                raise ValueError(f"Snapshot could not be found: {self._parent_snapshot_id}")
-
-            for manifest in previous_snapshot.manifests(io=self._table.io):
-                if manifest.has_added_files() or manifest.has_existing_files() or manifest.added_snapshot_id == self._snapshot_id:
-                    existing_manifests.append(manifest)
-
-        return existing_manifests
-
     def _deleted_entries(self) -> List[ManifestEntry]:
         """To determine if we need to record any deleted manifest entries.
 
@@ -2665,16 +2671,14 @@ class MergeAppendFiles(_SnapshotProducer):
         """
         return []
 
-    def _combine_manifests(
-        self, added_manifests: List[ManifestFile], delete_manifests: List[ManifestFile], existing_manifests: List[ManifestFile]
-    ) -> List[ManifestFile]:
-        unmerged_data_manifests = (
-            added_manifests
-            + delete_manifests
-            + [manifest for manifest in existing_manifests if manifest.content == ManifestContent.DATA]
-        )
-        # TODO: need to re-consider the name here: manifest containing positional deletes and manifest containing deleted entries
-        unmerged_deletes_manifests = [manifest for manifest in existing_manifests if manifest.content == ManifestContent.DELETES]
+    def _process_manifests(self, manifests: List[ManifestFile]) -> List[ManifestFile]:
+        """To perform any post-processing on the manifests before writing them to the new snapshot.
+
+        In MergeAppendFiles, we merge manifests based on the target size and the minimum count to merge
+        if automatic merge is enabled.
+        """
+        unmerged_data_manifests = [manifest for manifest in manifests if manifest.content == ManifestContent.DATA]
+        unmerged_deletes_manifests = [manifest for manifest in manifests if manifest.content == ManifestContent.DELETES]
 
         data_manifest_merge_manager = _ManifestMergeManager(
             target_size_bytes=self._target_size_bytes,
@@ -2686,27 +2690,7 @@ class MergeAppendFiles(_SnapshotProducer):
         return data_manifest_merge_manager.merge_manifests(unmerged_data_manifests) + unmerged_deletes_manifests
 
 
-class FastAppendFiles(_SnapshotProducer):
-    def _existing_manifests(self) -> List[ManifestFile]:
-        """To determine if there are any existing manifest files.
-
-        A fast append will add another ManifestFile to the ManifestList.
-        All the existing manifest files are considered existing.
-        """
-        existing_manifests = []
-
-        if self._parent_snapshot_id is not None:
-            previous_snapshot = self._table.snapshot_by_id(self._parent_snapshot_id)
-
-            if previous_snapshot is None:
-                raise ValueError(f"Snapshot could not be found: {self._parent_snapshot_id}")
-
-            for manifest in previous_snapshot.manifests(io=self._table.io):
-                if manifest.has_added_files() or manifest.has_existing_files() or manifest.added_snapshot_id == self._snapshot_id:
-                    existing_manifests.append(manifest)
-
-        return existing_manifests
-
+class FastAppendFiles(AppendFiles):
     def _deleted_entries(self) -> List[ManifestEntry]:
         """To determine if we need to record any deleted manifest entries.
 
@@ -2804,9 +2788,6 @@ class _ManifestMergeManager:
         return groups
 
     def _create_manifest(self, spec_id: int, manifest_bin: List[ManifestFile]) -> ManifestFile:
-        # TODO: later check if we need to implement cache:
-        #  https://github.com/apache/iceberg/blob/main/core/src/main/java/org/apache/iceberg/ManifestMergeManager.java#L165
-
         with self._snapshot_producer.new_manifest_writer(spec=self._snapshot_producer.spec(spec_id)) as writer:
             for manifest in manifest_bin:
                 for entry in self._snapshot_producer.fetch_manifest_entry(manifest):
