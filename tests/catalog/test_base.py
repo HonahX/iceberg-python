@@ -26,6 +26,7 @@ from typing import (
 
 import pyarrow as pa
 import pytest
+from pydantic_core import ValidationError
 from pytest_lazyfixture import lazy_fixture
 
 from pyiceberg.catalog import (
@@ -52,8 +53,9 @@ from pyiceberg.table import (
     SetCurrentSchemaUpdate,
     Table,
     TableIdentifier,
+    update_table_metadata,
 )
-from pyiceberg.table.metadata import TableMetadata, TableMetadataV1, new_table_metadata
+from pyiceberg.table.metadata import TableMetadataV1
 from pyiceberg.table.sorting import UNSORTED_SORT_ORDER, SortOrder
 from pyiceberg.transforms import IdentityTransform
 from pyiceberg.typedef import EMPTY_DICT
@@ -118,36 +120,13 @@ class InMemoryCatalog(Catalog):
         raise NotImplementedError
 
     def _commit_table(self, table_request: CommitTableRequest) -> CommitTableResponse:
-        new_metadata: Optional[TableMetadata] = None
-        metadata_location = ""
-        for update in table_request.updates:
-            if isinstance(update, AddSchemaUpdate):
-                add_schema_update: AddSchemaUpdate = update
-                identifier = tuple(table_request.identifier.namespace.root) + (table_request.identifier.name,)
-                table = self.__tables[identifier]
-                new_metadata = new_table_metadata(
-                    add_schema_update.schema_,
-                    table.metadata.partition_specs[0],
-                    table.sort_order(),
-                    table.location(),
-                    table.properties,
-                    table.metadata.table_uuid,
-                )
-
-                table = Table(
-                    identifier=identifier,
-                    metadata=new_metadata,
-                    metadata_location=f's3://warehouse/{"/".join(identifier)}/metadata/metadata.json',
-                    io=load_file_io(),
-                    catalog=self,
-                )
-
-                self.__tables[identifier] = table
-                metadata_location = f's3://warehouse/{"/".join(identifier)}/metadata/metadata.json'
+        identifier = tuple(table_request.identifier.namespace.root) + (table_request.identifier.name,)
+        table = self.__tables[identifier]
+        table.metadata = update_table_metadata(base_metadata=table.metadata, updates=table_request.updates)
 
         return CommitTableResponse(
-            metadata=new_metadata.model_dump() if new_metadata else {},
-            metadata_location=metadata_location if metadata_location else "",
+            metadata=table.metadata.model_dump(),
+            metadata_location=table.location(),
         )
 
     def load_table(self, identifier: Union[str, Identifier]) -> Table:
@@ -277,13 +256,16 @@ NO_SUCH_NAMESPACE_ERROR = "Namespace does not exist: \\('com', 'organization', '
 NAMESPACE_NOT_EMPTY_ERROR = "Namespace is not empty: \\('com', 'organization', 'department'\\)"
 
 
-def given_catalog_has_a_table(catalog: InMemoryCatalog) -> Table:
+def given_catalog_has_a_table(
+    catalog: InMemoryCatalog,
+    properties: Properties = EMPTY_DICT,
+) -> Table:
     return catalog.create_table(
         identifier=TEST_TABLE_IDENTIFIER,
         schema=TEST_TABLE_SCHEMA,
         location=TEST_TABLE_LOCATION,
         partition_spec=TEST_TABLE_PARTITION_SPEC,
-        properties=TEST_TABLE_PROPERTIES,
+        properties=properties or TEST_TABLE_PROPERTIES,
     )
 
 
@@ -617,8 +599,9 @@ def test_commit_table(catalog: InMemoryCatalog) -> None:
 
     # Then
     assert response.metadata.table_uuid == given_table.metadata.table_uuid
-    assert len(response.metadata.schemas) == 1
-    assert response.metadata.schemas[0] == new_schema
+    assert len(response.metadata.schemas) == 2
+    assert response.metadata.schemas[1] == new_schema
+    assert response.metadata.current_schema_id == new_schema.schema_id
 
 
 def test_add_column(catalog: InMemoryCatalog) -> None:
@@ -682,3 +665,17 @@ def test_add_column_with_statement(catalog: InMemoryCatalog) -> None:
 def test_catalog_repr(catalog: InMemoryCatalog) -> None:
     s = repr(catalog)
     assert s == "test.in.memory.catalog (<class 'test_base.InMemoryCatalog'>)"
+
+
+def test_table_properties_int_value(catalog: InMemoryCatalog) -> None:
+    # table properties can be set to int, but still serialized to string
+    property_with_int = {"property_name": 42}
+    given_table = given_catalog_has_a_table(catalog, properties=property_with_int)
+    assert isinstance(given_table.properties["property_name"], str)
+
+
+def test_table_properties_raise_for_none_value(catalog: InMemoryCatalog) -> None:
+    property_with_none = {"property_name": None}
+    with pytest.raises(ValidationError) as exc_info:
+        _ = given_catalog_has_a_table(catalog, properties=property_with_none)
+    assert "None type is not a supported value in properties: property_name" in str(exc_info.value)
