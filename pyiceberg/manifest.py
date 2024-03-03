@@ -529,6 +529,7 @@ MANIFEST_LIST_FILE_SCHEMAS: Dict[int, Schema] = {
 
 MANIFEST_LIST_FILE_STRUCTS = {format_version: schema.as_struct() for format_version, schema in MANIFEST_LIST_FILE_SCHEMAS.items()}
 
+
 POSITIONAL_DELETE_SCHEMA = Schema(
     NestedField(2147483546, "file_path", StringType()), NestedField(2147483545, "pos", IntegerType())
 )
