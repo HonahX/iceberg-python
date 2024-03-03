@@ -2481,13 +2481,13 @@ def _dataframe_to_data_files(
     yield from write_file(io=io, table_metadata=table_metadata, tasks=iter([WriteTask(write_uuid, next(counter), df)]))
 
 
-class _SnapshotProducer(UpdateTableMetadata["_MergingSnapshotProducer"]):
+class _SnapshotProducer(UpdateTableMetadata["_SnapshotProducer"]):
     commit_uuid: uuid.UUID
+    _io: FileIO
     _operation: Operation
     _snapshot_id: int
     _parent_snapshot_id: Optional[int]
     _added_data_files: List[DataFile]
-    _transaction: Optional[Transaction]
     _manifest_num_counter: itertools.count[int]
 
     def __init__(
@@ -2507,7 +2507,6 @@ class _SnapshotProducer(UpdateTableMetadata["_MergingSnapshotProducer"]):
             snapshot.snapshot_id if (snapshot := self._transaction.table_metadata.current_snapshot()) else None
         )
         self._added_data_files = []
-        self._transaction = transaction
         self._manifest_num_counter = itertools.count(0)
 
     def append_data_file(self, data_file: DataFile) -> _SnapshotProducer:
@@ -2646,26 +2645,28 @@ class _SnapshotProducer(UpdateTableMetadata["_MergingSnapshotProducer"]):
         return self._snapshot_id
 
     def spec(self, spec_id: int) -> PartitionSpec:
-        return self._table.specs()[spec_id]
+        return self._transaction.table_metadata.specs()[spec_id]
 
     def new_manifest_writer(self, spec: PartitionSpec) -> ManifestWriter:
         return write_manifest(
-            format_version=self._table.format_version,
+            format_version=self._transaction.table_metadata.format_version,
             spec=spec,
-            schema=self._table.schema(),
+            schema=self._transaction.table_metadata.schema(),
             output_file=self.new_manifest_output(),
             snapshot_id=self._snapshot_id,
         )
 
     def new_manifest_output(self) -> OutputFile:
-        return self._table.io.new_output(
+        return self._io.new_output(
             _new_manifest_path(
-                location=self._table.location(), num=next(self._manifest_num_counter), commit_uuid=self.commit_uuid
+                location=self._transaction.table_metadata.location,
+                num=next(self._manifest_num_counter),
+                commit_uuid=self.commit_uuid,
             )
         )
 
     def fetch_manifest_entry(self, manifest: ManifestFile, discard_deleted: bool = True) -> List[ManifestEntry]:
-        return manifest.fetch_manifest_entry(io=self._table.io, discard_deleted=discard_deleted)
+        return manifest.fetch_manifest_entry(io=self._io, discard_deleted=discard_deleted)
 
 
 class AppendFiles(_SnapshotProducer, ABC):
@@ -2699,19 +2700,25 @@ class MergeAppendFiles(AppendFiles):
     def __init__(
         self,
         operation: Operation,
-        table: Table,
+        transaction: Transaction,
+        io: FileIO,
         commit_uuid: Optional[uuid.UUID] = None,
-        transaction: Optional[Transaction] = None,
     ) -> None:
-        super().__init__(operation, table, commit_uuid, transaction)
+        super().__init__(operation, transaction, io, commit_uuid)
         self._target_size_bytes = PropertyUtil.property_as_int(
-            self._table.properties, TableProperties.MANIFEST_TARGET_SIZE_BYTES, TableProperties.MANIFEST_TARGET_SIZE_BYTES_DEFAULT
+            self._transaction.table_metadata.properties,
+            TableProperties.MANIFEST_TARGET_SIZE_BYTES,
+            TableProperties.MANIFEST_TARGET_SIZE_BYTES_DEFAULT,
         )  # type: ignore
         self._min_count_to_merge = PropertyUtil.property_as_int(
-            self._table.properties, TableProperties.MANIFEST_MIN_MERGE_COUNT, TableProperties.MANIFEST_MIN_MERGE_COUNT_DEFAULT
+            self._transaction.table_metadata.properties,
+            TableProperties.MANIFEST_MIN_MERGE_COUNT,
+            TableProperties.MANIFEST_MIN_MERGE_COUNT_DEFAULT,
         )  # type: ignore
         self._merge_enabled = PropertyUtil.property_as_bool(
-            self._table.properties, TableProperties.MANIFEST_MERGE_ENABLED, TableProperties.MANIFEST_MERGE_ENABLED_DEFAULT
+            self._transaction.table_metadata.properties,
+            TableProperties.MANIFEST_MERGE_ENABLED,
+            TableProperties.MANIFEST_MERGE_ENABLED_DEFAULT,
         )
 
     def _deleted_entries(self) -> List[ManifestEntry]:
@@ -2804,7 +2811,7 @@ class UpdateSnapshot:
         return FastAppendFiles(operation=Operation.APPEND, transaction=self._transaction, io=self._io)
 
     def merge_append(self) -> MergeAppendFiles:
-        return MergeAppendFiles(table=self._table, operation=Operation.APPEND, transaction=self._transaction)
+        return MergeAppendFiles(operation=Operation.APPEND, transaction=self._transaction, io=self._io)
 
     def overwrite(self) -> OverwriteFiles:
         return OverwriteFiles(
