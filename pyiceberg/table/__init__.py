@@ -1708,7 +1708,7 @@ class DataScan(TableScan):
 
         manifests = [
             manifest_file
-            for manifest_file in snapshot.manifests(self.io)
+            for manifest_file in snapshot.manifests(self.io, snapshot.manifest_list)
             if manifest_evaluators[manifest_file.partition_spec_id](manifest_file)
         ]
 
@@ -2941,7 +2941,7 @@ class FastAppendFiles(_MergingSnapshotProducer):
             if previous_snapshot is None:
                 raise ValueError(f"Snapshot could not be found: {self._parent_snapshot_id}")
 
-            for manifest in previous_snapshot.manifests(io=self._io):
+            for manifest in previous_snapshot.manifests(io=self._io, manifest_list=previous_snapshot.manifest_list):
                 if manifest.has_added_files() or manifest.has_existing_files() or manifest.added_snapshot_id == self._snapshot_id:
                     existing_manifests.append(manifest)
 
@@ -2992,7 +2992,7 @@ class OverwriteFiles(_MergingSnapshotProducer):
                     if entry.data_file.content == DataFileContent.DATA
                 ]
 
-            list_of_entries = executor.map(_get_entries, previous_snapshot.manifests(self._io))
+            list_of_entries = executor.map(_get_entries, previous_snapshot.manifests(self._io, previous_snapshot.manifest_list))
             return list(chain(*list_of_entries))
         else:
             return []
@@ -3384,7 +3384,7 @@ class InspectTable:
 
         entries = []
         snapshot = self._get_snapshot(snapshot_id)
-        for manifest in snapshot.manifests(self.tbl.io):
+        for manifest in snapshot.manifests(self.tbl.io, snapshot.manifest_list):
             for entry in manifest.fetch_manifest_entry(io=self.tbl.io):
                 column_sizes = entry.data_file.column_sizes or {}
                 value_counts = entry.data_file.value_counts or {}
@@ -3546,7 +3546,7 @@ class InspectTable:
 
         partitions_map: Dict[Tuple[str, Any], Any] = {}
         snapshot = self._get_snapshot(snapshot_id)
-        for manifest in snapshot.manifests(self.tbl.io):
+        for manifest in snapshot.manifests(self.tbl.io, snapshot.manifest_list):
             for entry in manifest.fetch_manifest_entry(io=self.tbl.io):
                 partition = entry.data_file.partition
                 partition_record_dict = {
@@ -3624,7 +3624,7 @@ class InspectTable:
         specs = self.tbl.metadata.specs()
         manifests = []
         if snapshot := self.tbl.metadata.current_snapshot():
-            for manifest in snapshot.manifests(self.tbl.io):
+            for manifest in snapshot.manifests(self.tbl.io, snapshot.manifest_list):
                 is_data_file = manifest.content == ManifestContent.DATA
                 is_delete_file = manifest.content == ManifestContent.DELETES
                 manifests.append({
