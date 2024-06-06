@@ -19,7 +19,6 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 from enum import Enum
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any, DefaultDict, Dict, Iterable, List, Mapping, Optional
 
 from pydantic import Field, PrivateAttr, model_serializer
@@ -249,7 +248,6 @@ class Snapshot(IcebergBaseModel):
         return result_str
 
     @staticmethod
-    @lru_cache
     def _manifests(io: FileIO, manifest_list: Optional[str]) -> List[ManifestFile]:
         """Return the manifests for the given snapshot."""
         if manifest_list not in (None, ""):
