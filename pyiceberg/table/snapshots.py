@@ -259,7 +259,7 @@ class Snapshot(IcebergBaseModel):
 
     def manifests(self, io: FileIO) -> List[ManifestFile]:
         """Return the manifests for the given snapshot."""
-        return Snapshot._manifests(io, self.manifest_list)
+        return _manifests(io, self.manifest_list)
 
 
 class MetadataLogEntry(IcebergBaseModel):
