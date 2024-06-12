@@ -19,6 +19,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 from enum import Enum
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, DefaultDict, Dict, Iterable, List, Mapping, Optional
 
 from pydantic import Field, PrivateAttr, model_serializer
@@ -228,6 +229,15 @@ class Summary(IcebergBaseModel, Mapping[str, str]):
         )
 
 
+@lru_cache
+def _manifests(io: FileIO, manifest_list: Optional[str]) -> List[ManifestFile]:
+    """Return the manifests for the given snapshot."""
+    if manifest_list not in (None, ""):
+        file = io.new_input(manifest_list)  # type: ignore
+        return list(read_manifest_list(file))
+    return []
+
+
 class Snapshot(IcebergBaseModel):
     snapshot_id: int = Field(alias="snapshot-id")
     parent_snapshot_id: Optional[int] = Field(alias="parent-snapshot-id", default=None)
@@ -248,10 +258,8 @@ class Snapshot(IcebergBaseModel):
         return result_str
 
     def manifests(self, io: FileIO) -> List[ManifestFile]:
-        if self.manifest_list is not None:
-            file = io.new_input(self.manifest_list)
-            return list(read_manifest_list(file))
-        return []
+        """Return the manifests for the given snapshot."""
+        return _manifests(io, self.manifest_list)
 
 
 class MetadataLogEntry(IcebergBaseModel):
