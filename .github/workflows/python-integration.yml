@@ -32,6 +32,9 @@ concurrency:
 jobs:
   integration-test:
     runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        python: [ '3.11' ]
 
     steps:
     - uses: actions/checkout@v4
