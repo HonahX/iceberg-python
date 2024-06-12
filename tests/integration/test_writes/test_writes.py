@@ -555,8 +555,7 @@ def test_duckdb_url_import(warehouse: Path, arrow_table_with_null: pa.Table) -> 
 
     import duckdb
 
-    duckdb.install_extension("iceberg")
-    duckdb.load_extension("iceberg")
+    duckdb.sql("INSTALL iceberg; LOAD iceberg;")
     result = duckdb.sql(
         f"""
     SELECT *
