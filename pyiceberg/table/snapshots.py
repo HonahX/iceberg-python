@@ -24,9 +24,10 @@ from typing import TYPE_CHECKING, Any, DefaultDict, Dict, Iterable, List, Mappin
 from pydantic import Field, PrivateAttr, model_serializer
 
 from pyiceberg.io import FileIO
-from pyiceberg.manifest import DataFile, DataFileContent, ManifestFile, read_manifest_list
+from pyiceberg.manifest import DataFile, DataFileContent, ManifestFile
 from pyiceberg.partitioning import UNPARTITIONED_PARTITION_SPEC, PartitionSpec
 from pyiceberg.schema import Schema
+from pyiceberg.utils.manifest_util import fetch_manifests
 
 if TYPE_CHECKING:
     from pyiceberg.table.metadata import TableMetadata
@@ -248,10 +249,8 @@ class Snapshot(IcebergBaseModel):
         return result_str
 
     def manifests(self, io: FileIO) -> List[ManifestFile]:
-        if self.manifest_list is not None:
-            file = io.new_input(self.manifest_list)
-            return list(read_manifest_list(file))
-        return []
+        """Return the manifests for the given snapshot."""
+        return fetch_manifests(io, self.manifest_list)
 
 
 class MetadataLogEntry(IcebergBaseModel):
