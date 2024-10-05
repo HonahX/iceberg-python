@@ -333,7 +333,25 @@ def _generate_snapshot_id() -> int:
     return snapshot_id
 
 
-class TableMetadataV1(TableMetadataCommonFields, IcebergBaseModel):
+class _UnvalidatedTableMetadataV1(TableMetadataCommonFields, IcebergBaseModel):
+    format_version: Literal[1] = Field(alias="format-version", default=1)
+    """An integer version number for the format. Currently, this can be 1 or 2
+    based on the spec. Implementations must throw an exception if a table’s
+    version is higher than the supported version."""
+
+    schema_: Schema = Field(alias="schema")
+    """The table’s current schema. (Deprecated: use schemas and
+    current-schema-id instead)."""
+
+    partition_spec: List[Dict[str, Any]] = Field(alias="partition-spec", default_factory=list)
+    """The table’s current partition spec, stored as only fields.
+    Note that this is used by writers to partition data, but is
+    not used when reading because reads use the specs stored in
+    manifest files. (Deprecated: use partition-specs and default-spec-id
+    instead)."""
+
+
+class TableMetadataV1(_UnvalidatedTableMetadataV1, IcebergBaseModel):
     """Represents version 1 of the Table Metadata.
 
     More information about the specification:
@@ -449,24 +467,19 @@ class TableMetadataV1(TableMetadataCommonFields, IcebergBaseModel):
         metadata["format-version"] = 2
         return TableMetadataV2.model_validate(metadata)
 
-    format_version: Literal[1] = Field(alias="format-version", default=1)
+
+class _UnvalidatedTableMetadataV2(TableMetadataCommonFields, IcebergBaseModel):
+    format_version: Literal[2] = Field(alias="format-version", default=2)
     """An integer version number for the format. Currently, this can be 1 or 2
     based on the spec. Implementations must throw an exception if a table’s
     version is higher than the supported version."""
 
-    schema_: Schema = Field(alias="schema")
-    """The table’s current schema. (Deprecated: use schemas and
-    current-schema-id instead)."""
-
-    partition_spec: List[Dict[str, Any]] = Field(alias="partition-spec", default_factory=list)
-    """The table’s current partition spec, stored as only fields.
-    Note that this is used by writers to partition data, but is
-    not used when reading because reads use the specs stored in
-    manifest files. (Deprecated: use partition-specs and default-spec-id
-    instead)."""
+    last_sequence_number: int = Field(alias="last-sequence-number", default=INITIAL_SEQUENCE_NUMBER)
+    """The table’s highest assigned sequence number, a monotonically
+    increasing long that tracks the order of snapshots in a table."""
 
 
-class TableMetadataV2(TableMetadataCommonFields, IcebergBaseModel):
+class TableMetadataV2(_UnvalidatedTableMetadataV2, IcebergBaseModel):
     """Represents version 2 of the Table Metadata.
 
     This extends Version 1 with row-level deletes, and adds some additional
@@ -497,16 +510,10 @@ class TableMetadataV2(TableMetadataCommonFields, IcebergBaseModel):
     def construct_refs(cls, table_metadata: TableMetadata) -> TableMetadata:
         return construct_refs(table_metadata)
 
-    format_version: Literal[2] = Field(alias="format-version", default=2)
-    """An integer version number for the format. Currently, this can be 1 or 2
-    based on the spec. Implementations must throw an exception if a table’s
-    version is higher than the supported version."""
 
-    last_sequence_number: int = Field(alias="last-sequence-number", default=INITIAL_SEQUENCE_NUMBER)
-    """The table’s highest assigned sequence number, a monotonically
-    increasing long that tracks the order of snapshots in a table."""
-
-
+_UnvalidatedTableMetadata = Annotated[
+    Union[_UnvalidatedTableMetadataV1, _UnvalidatedTableMetadataV2], Field(discriminator="format_version")
+]
 TableMetadata = Annotated[Union[TableMetadataV1, TableMetadataV2], Field(discriminator="format_version")]
 
 
@@ -584,6 +591,21 @@ class TableMetadataUtil:
             return TableMetadataV1(**data)
         elif format_version == 2:
             return TableMetadataV2(**data)
+        else:
+            raise ValidationError(f"Unknown format version: {format_version}")
+
+
+class _TableMetadataUpdateUtil:
+    @staticmethod
+    def parse_obj(data: Dict[str, Any]) -> _UnvalidatedTableMetadata:
+        if "format-version" not in data:
+            raise ValidationError(f"Missing format-version in TableMetadata: {data}")
+        format_version = data["format-version"]
+
+        if format_version == 1:
+            return _UnvalidatedTableMetadataV1(**data)
+        elif format_version == 2:
+            return _UnvalidatedTableMetadataV2(**data)
         else:
             raise ValidationError(f"Unknown format version: {format_version}")
 

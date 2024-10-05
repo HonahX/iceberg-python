@@ -41,8 +41,9 @@ from pyiceberg.exceptions import (
 )
 from pyiceberg.io import FSSPEC_FILE_IO, PY_IO_IMPL
 from pyiceberg.io.pyarrow import _dataframe_to_data_files, schema_to_pyarrow
-from pyiceberg.partitioning import UNPARTITIONED_PARTITION_SPEC
-from pyiceberg.schema import Schema
+from pyiceberg.partitioning import UNPARTITIONED_PARTITION_SPEC, PartitionField, PartitionSpec
+from pyiceberg.schema import Schema, assign_fresh_schema_ids
+from pyiceberg.table.metadata import TableMetadata, _UnvalidatedTableMetadata
 from pyiceberg.table.snapshots import Operation
 from pyiceberg.table.sorting import (
     NullOrder,
@@ -52,7 +53,7 @@ from pyiceberg.table.sorting import (
 )
 from pyiceberg.transforms import IdentityTransform
 from pyiceberg.typedef import Identifier
-from pyiceberg.types import IntegerType, strtobool
+from pyiceberg.types import IntegerType, NestedField, StringType, strtobool
 
 
 @pytest.fixture(scope="module")
@@ -1471,8 +1472,12 @@ def test_create_table_transaction(catalog: SqlCatalog, format_version: int) -> N
         ]),
     )
 
+    iceberg_schema = assign_fresh_schema_ids(catalog._convert_schema_if_needed(pa_table.schema))
+
+    test_spec = PartitionSpec(*[PartitionField(source_id=1, field_id=1001, transform=IdentityTransform(), name="test1")])
+
     with catalog.create_table_transaction(
-        identifier=identifier, schema=pa_table.schema, properties={"format-version": str(format_version)}
+        identifier=identifier, schema=iceberg_schema, partition_spec=test_spec, properties={"format-version": str(format_version)}
     ) as txn:
         with txn.update_snapshot().fast_append() as snapshot_update:
             for data_file in _dataframe_to_data_files(table_metadata=txn.table_metadata, df=pa_table, io=txn._table.io):
@@ -1488,8 +1493,97 @@ def test_create_table_transaction(catalog: SqlCatalog, format_version: int) -> N
                 snapshot_update.append_data_file(data_file)
 
     tbl = catalog.load_table(identifier=identifier)
+    print(tbl.spec())
     assert tbl.format_version == format_version
     assert len(tbl.scan().to_arrow()) == 6
+
+
+@pytest.mark.parametrize(
+    "catalog",
+    [
+        lazy_fixture("catalog_memory"),
+    ],
+)
+def test_create_table_transaction_remove_initial(catalog: SqlCatalog) -> None:
+    identifier = "default.create_table_transaction_remove_initial"
+    try:
+        catalog.create_namespace("default")
+    except NamespaceAlreadyExistsError:
+        pass
+
+    try:
+        catalog.drop_table(identifier=identifier)
+    except NoSuchTableError:
+        pass
+
+    iceberg_schema = Schema(*[NestedField(field_id=1, name="a", field_type=StringType())])
+
+    iceberg_spec = PartitionSpec(*[PartitionField(source_id=1, field_id=1001, transform=IdentityTransform(), name="test1")])
+
+    sort_order = SortOrder(*[SortField(source_id=1, transform=IdentityTransform(), direction=SortDirection.ASC)])
+
+
+
+    txn = catalog.create_table_transaction(
+        identifier=identifier,
+        schema=iceberg_schema,
+        partition_spec=iceberg_spec,
+        sort_order=sort_order,
+        properties={"format-version": "2"},
+    )
+    txn.commit_transaction()
+
+    tbl = catalog.load_table(identifier)
+
+    print("")
+    print("=====Schemas====")
+    print(tbl.schemas())
+    print("=====Specs====")
+    print(tbl.specs())
+    print("=====SortOrders====")
+    print(tbl.sort_orders())
+
+
+@pytest.mark.parametrize(
+    "catalog",
+    [
+        lazy_fixture("catalog_memory"),
+    ],
+)
+def test_create_table_remove_initial(catalog: SqlCatalog) -> None:
+    identifier = "default.create_table_remove_initial"
+    try:
+        catalog.create_namespace("default")
+    except NamespaceAlreadyExistsError:
+        pass
+
+    try:
+        catalog.drop_table(identifier=identifier)
+    except NoSuchTableError:
+        pass
+
+    iceberg_schema = Schema(*[NestedField(field_id=1, name="a", field_type=StringType())])
+
+    iceberg_spec = PartitionSpec(*[PartitionField(source_id=1, field_id=1001, transform=IdentityTransform(), name="test1")])
+
+    sort_order = SortOrder(*[SortField(source_id=1, transform=IdentityTransform(), direction=SortDirection.ASC)])
+
+    catalog.create_table(
+        identifier=identifier,
+        schema=iceberg_schema,
+        partition_spec=iceberg_spec,
+        sort_order=sort_order,
+        properties={"format-version": "2"},
+    )
+
+    tbl = catalog.load_table(identifier)
+    print("")
+    print("=====Schemas====")
+    print(tbl.schemas())
+    print("=====Specs====")
+    print(tbl.specs())
+    print("=====SortOrders====")
+    print(tbl.sort_orders())
 
 
 @pytest.mark.parametrize(

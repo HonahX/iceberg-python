@@ -27,16 +27,22 @@ from pydantic import Field, field_validator
 from typing_extensions import Annotated
 
 from pyiceberg.exceptions import CommitFailedException
-from pyiceberg.partitioning import INITIAL_PARTITION_SPEC_ID, PARTITION_FIELD_ID_START, PartitionSpec
+from pyiceberg.partitioning import PARTITION_FIELD_ID_START, PartitionSpec
 from pyiceberg.schema import Schema
-from pyiceberg.table.metadata import SUPPORTED_TABLE_FORMAT_VERSION, TableMetadata, TableMetadataUtil
+from pyiceberg.table.metadata import (
+    SUPPORTED_TABLE_FORMAT_VERSION,
+    TableMetadata,
+    TableMetadataUtil,
+    _TableMetadataUpdateUtil,
+    _UnvalidatedTableMetadata,
+)
 from pyiceberg.table.refs import MAIN_BRANCH, SnapshotRef
 from pyiceberg.table.snapshots import (
     MetadataLogEntry,
     Snapshot,
     SnapshotLogEntry,
 )
-from pyiceberg.table.sorting import UNSORTED_SORT_ORDER, SortOrder
+from pyiceberg.table.sorting import SortOrder
 from pyiceberg.typedef import (
     IcebergBaseModel,
     Properties,
@@ -218,7 +224,9 @@ class _TableMetadataUpdateContext:
 
 
 @singledispatch
-def _apply_table_update(update: TableUpdate, base_metadata: TableMetadata, context: _TableMetadataUpdateContext) -> TableMetadata:
+def _apply_table_update(
+    update: TableUpdate, base_metadata: _UnvalidatedTableMetadata, context: _TableMetadataUpdateContext
+) -> _UnvalidatedTableMetadata:
     """Apply a table update to the table metadata.
 
     Args:
@@ -234,7 +242,9 @@ def _apply_table_update(update: TableUpdate, base_metadata: TableMetadata, conte
 
 
 @_apply_table_update.register(AssignUUIDUpdate)
-def _(update: AssignUUIDUpdate, base_metadata: TableMetadata, context: _TableMetadataUpdateContext) -> TableMetadata:
+def _(
+    update: AssignUUIDUpdate, base_metadata: _UnvalidatedTableMetadata, context: _TableMetadataUpdateContext
+) -> _UnvalidatedTableMetadata:
     if update.uuid == base_metadata.table_uuid:
         return base_metadata
 
@@ -243,7 +253,9 @@ def _(update: AssignUUIDUpdate, base_metadata: TableMetadata, context: _TableMet
 
 
 @_apply_table_update.register(SetLocationUpdate)
-def _(update: SetLocationUpdate, base_metadata: TableMetadata, context: _TableMetadataUpdateContext) -> TableMetadata:
+def _(
+    update: SetLocationUpdate, base_metadata: _UnvalidatedTableMetadata, context: _TableMetadataUpdateContext
+) -> _UnvalidatedTableMetadata:
     context.add_update(update)
     return base_metadata.model_copy(update={"location": update.location})
 
@@ -251,9 +263,9 @@ def _(update: SetLocationUpdate, base_metadata: TableMetadata, context: _TableMe
 @_apply_table_update.register(UpgradeFormatVersionUpdate)
 def _(
     update: UpgradeFormatVersionUpdate,
-    base_metadata: TableMetadata,
+    base_metadata: _UnvalidatedTableMetadata,
     context: _TableMetadataUpdateContext,
-) -> TableMetadata:
+) -> _UnvalidatedTableMetadata:
     if update.format_version > SUPPORTED_TABLE_FORMAT_VERSION:
         raise ValueError(f"Unsupported table format version: {update.format_version}")
     elif update.format_version < base_metadata.format_version:
@@ -265,11 +277,13 @@ def _(
     updated_metadata_data["format-version"] = update.format_version
 
     context.add_update(update)
-    return TableMetadataUtil.parse_obj(updated_metadata_data)
+    return _TableMetadataUpdateUtil.parse_obj(updated_metadata_data)
 
 
 @_apply_table_update.register(SetPropertiesUpdate)
-def _(update: SetPropertiesUpdate, base_metadata: TableMetadata, context: _TableMetadataUpdateContext) -> TableMetadata:
+def _(
+    update: SetPropertiesUpdate, base_metadata: _UnvalidatedTableMetadata, context: _TableMetadataUpdateContext
+) -> _UnvalidatedTableMetadata:
     if len(update.updates) == 0:
         return base_metadata
 
@@ -281,7 +295,9 @@ def _(update: SetPropertiesUpdate, base_metadata: TableMetadata, context: _Table
 
 
 @_apply_table_update.register(RemovePropertiesUpdate)
-def _(update: RemovePropertiesUpdate, base_metadata: TableMetadata, context: _TableMetadataUpdateContext) -> TableMetadata:
+def _(
+    update: RemovePropertiesUpdate, base_metadata: _UnvalidatedTableMetadata, context: _TableMetadataUpdateContext
+) -> _UnvalidatedTableMetadata:
     if len(update.removals) == 0:
         return base_metadata
 
@@ -294,7 +310,9 @@ def _(update: RemovePropertiesUpdate, base_metadata: TableMetadata, context: _Ta
 
 
 @_apply_table_update.register(AddSchemaUpdate)
-def _(update: AddSchemaUpdate, base_metadata: TableMetadata, context: _TableMetadataUpdateContext) -> TableMetadata:
+def _(
+    update: AddSchemaUpdate, base_metadata: _UnvalidatedTableMetadata, context: _TableMetadataUpdateContext
+) -> _UnvalidatedTableMetadata:
     if update.last_column_id < base_metadata.last_column_id:
         raise ValueError(f"Invalid last column id {update.last_column_id}, must be >= {base_metadata.last_column_id}")
 
@@ -309,7 +327,9 @@ def _(update: AddSchemaUpdate, base_metadata: TableMetadata, context: _TableMeta
 
 
 @_apply_table_update.register(SetCurrentSchemaUpdate)
-def _(update: SetCurrentSchemaUpdate, base_metadata: TableMetadata, context: _TableMetadataUpdateContext) -> TableMetadata:
+def _(
+    update: SetCurrentSchemaUpdate, base_metadata: _UnvalidatedTableMetadata, context: _TableMetadataUpdateContext
+) -> _UnvalidatedTableMetadata:
     new_schema_id = update.schema_id
     if new_schema_id == -1:
         # The last added schema should be in base_metadata.schemas at this point
@@ -329,11 +349,10 @@ def _(update: SetCurrentSchemaUpdate, base_metadata: TableMetadata, context: _Ta
 
 
 @_apply_table_update.register(AddPartitionSpecUpdate)
-def _(update: AddPartitionSpecUpdate, base_metadata: TableMetadata, context: _TableMetadataUpdateContext) -> TableMetadata:
+def _(
+    update: AddPartitionSpecUpdate, base_metadata: _UnvalidatedTableMetadata, context: _TableMetadataUpdateContext
+) -> _UnvalidatedTableMetadata:
     context.add_update(update)
-    if update.spec.spec_id == INITIAL_PARTITION_SPEC_ID:
-        # no op
-        return base_metadata
 
     for spec in base_metadata.partition_specs:
         if spec.spec_id == update.spec.spec_id:
@@ -351,7 +370,9 @@ def _(update: AddPartitionSpecUpdate, base_metadata: TableMetadata, context: _Ta
 
 
 @_apply_table_update.register(SetDefaultSpecUpdate)
-def _(update: SetDefaultSpecUpdate, base_metadata: TableMetadata, context: _TableMetadataUpdateContext) -> TableMetadata:
+def _(
+    update: SetDefaultSpecUpdate, base_metadata: _UnvalidatedTableMetadata, context: _TableMetadataUpdateContext
+) -> _UnvalidatedTableMetadata:
     new_spec_id = update.spec_id
     if new_spec_id == -1:
         new_spec_id = max(spec.spec_id for spec in base_metadata.partition_specs)
@@ -373,7 +394,9 @@ def _(update: SetDefaultSpecUpdate, base_metadata: TableMetadata, context: _Tabl
 
 
 @_apply_table_update.register(AddSnapshotUpdate)
-def _(update: AddSnapshotUpdate, base_metadata: TableMetadata, context: _TableMetadataUpdateContext) -> TableMetadata:
+def _(
+    update: AddSnapshotUpdate, base_metadata: _UnvalidatedTableMetadata, context: _TableMetadataUpdateContext
+) -> _UnvalidatedTableMetadata:
     if len(base_metadata.schemas) == 0:
         raise ValueError("Attempting to add a snapshot before a schema is added")
     elif len(base_metadata.partition_specs) == 0:
@@ -404,7 +427,9 @@ def _(update: AddSnapshotUpdate, base_metadata: TableMetadata, context: _TableMe
 
 
 @_apply_table_update.register(SetSnapshotRefUpdate)
-def _(update: SetSnapshotRefUpdate, base_metadata: TableMetadata, context: _TableMetadataUpdateContext) -> TableMetadata:
+def _(
+    update: SetSnapshotRefUpdate, base_metadata: _UnvalidatedTableMetadata, context: _TableMetadataUpdateContext
+) -> _UnvalidatedTableMetadata:
     snapshot_ref = SnapshotRef(
         snapshot_id=update.snapshot_id,
         snapshot_ref_type=update.type,
@@ -443,18 +468,19 @@ def _(update: SetSnapshotRefUpdate, base_metadata: TableMetadata, context: _Tabl
 
 
 @_apply_table_update.register(RemoveSnapshotRefUpdate)
-def _(update: RemoveSnapshotRefUpdate, base_metadata: TableMetadata, context: _TableMetadataUpdateContext) -> TableMetadata:
+def _(
+    update: RemoveSnapshotRefUpdate, base_metadata: _UnvalidatedTableMetadata, context: _TableMetadataUpdateContext
+) -> _UnvalidatedTableMetadata:
     # (TODO) actually implement this
     context.add_update(update)
     return base_metadata
 
 
 @_apply_table_update.register(AddSortOrderUpdate)
-def _(update: AddSortOrderUpdate, base_metadata: TableMetadata, context: _TableMetadataUpdateContext) -> TableMetadata:
+def _(
+    update: AddSortOrderUpdate, base_metadata: _UnvalidatedTableMetadata, context: _TableMetadataUpdateContext
+) -> _UnvalidatedTableMetadata:
     context.add_update(update)
-    if update.sort_order == UNSORTED_SORT_ORDER:
-        # no op
-        return base_metadata
     return base_metadata.model_copy(
         update={
             "sort_orders": base_metadata.sort_orders + [update.sort_order],
@@ -465,9 +491,9 @@ def _(update: AddSortOrderUpdate, base_metadata: TableMetadata, context: _TableM
 @_apply_table_update.register(SetDefaultSortOrderUpdate)
 def _(
     update: SetDefaultSortOrderUpdate,
-    base_metadata: TableMetadata,
+    base_metadata: _UnvalidatedTableMetadata,
     context: _TableMetadataUpdateContext,
-) -> TableMetadata:
+) -> _UnvalidatedTableMetadata:
     new_sort_order_id = update.sort_order_id
     if new_sort_order_id == -1:
         # The last added sort order should be in base_metadata.sort_orders at this point
@@ -504,10 +530,12 @@ def update_table_metadata(
         The metadata with the updates applied.
     """
     context = _TableMetadataUpdateContext()
-    new_metadata = base_metadata
+    intermediate_update = _TableMetadataUpdateUtil.parse_obj(base_metadata.model_dump())
 
     for update in updates:
-        new_metadata = _apply_table_update(update, new_metadata, context)
+        intermediate_update = _apply_table_update(update, intermediate_update, context)
+
+    new_metadata = TableMetadataUtil.parse_obj(intermediate_update.model_dump())
 
     # Update last_updated_ms if it was not updated by update operations
     if context.has_changes():
